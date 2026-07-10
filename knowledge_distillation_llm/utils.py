@@ -1,33 +1,43 @@
 import torch
 
-# 计算前向kl散度
+# 计算前向kl散度  KL(p‖q) = Σ_x p(x)·log(p(x)/q(x))，p=教师，q=学生
 def compute_fkl(
-        logits, 
-        teacher_logits, 
-        target, 
-        padding_id,
-        reduction="sum",
-        temp = 1.0, 
-        
+        logits,              # 学生 logits: [batch, seq_len, vocab]
+        teacher_logits,      # 教师 logits: [batch, seq_len, vocab]
+        target,              # 真实 token id: [batch, seq_len]，用于定位 padding
+        padding_id,          # padding token 的 id
+        reduction="sum",     # 聚合方式: "sum"=按样本求和, "mean"=按真实 token 平均
+        temp = 1.0,          # 温度 T，T>1 让分布变平滑，暴露"暗知识"
     ):
+        # —— 温度缩放：除以 T 让 softmax 平滑。严格蒸馏损失还应乘 T² 补偿梯度，
+        #    这里省略，相当于整体缩放 loss，不影响优化方向 ——
         logits = logits / temp
         teacher_logits = teacher_logits / temp
 
+        # 学生 q 的对数概率: log_softmax 数值稳定，避免 log(0)
         log_probs = torch.log_softmax(logits, -1, dtype=torch.float32)
+        # 教师 p 的概率
         teacher_probs = torch.softmax(teacher_logits, -1, dtype=torch.float32)
+        # 教师 p 的对数概率
         teacher_log_probs = torch.log_softmax(teacher_logits, -1, dtype=torch.float32)
-        kl = (teacher_probs * (teacher_log_probs - log_probs)) 
+        # 逐元素: p*(log p - log q) = p*log(p/q)，对 vocab 维求和后即前向 KL
+        kl = (teacher_probs * (teacher_log_probs - log_probs))
+        # 在 vocab 维(dim=-1)求和 → 每个 token 一个 KL 值: [batch, seq_len]
         kl = kl.sum(-1)
+        # padding 掩码: target 中等于 padding_id 的位置为 True
         pad_mask = target.eq(padding_id)
+        # 把 padding 位置(非真实 token)的 KL 清零; masked_fill_ 下划线=原地操作省内存
         kl = kl.masked_fill_(pad_mask, 0.0)
         if reduction == "sum":
-            
+            # 在 seq 维(dim=1)求和 → 每个样本一个标量: [batch]
             kl = kl.sum(dim=1)
-        
         elif reduction == "mean":
+            # 除以非 padding 的真实 token 数取平均，避免长样本被过度惩罚
             kl = kl.sum(dim=1) / (~pad_mask).sum(dim=1)
 
         return kl
+
+        
 # 计算反向kl散度
 def compute_rkl(
         logits, 

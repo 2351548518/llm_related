@@ -47,14 +47,18 @@ class KGTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         
         outputs = model(**inputs)
+
+        # 教师模型 不参与 模型的更新 梯度的计算
         with torch.no_grad():
             teacher_outputs = self.teacher_model(**inputs)
         
-        loss = outputs.loss
+        loss = outputs.loss # 学生的 模型输出 的交叉熵损失（输出值 和 真实值 的比较）
         logits = outputs.logits
         teacher_logits = teacher_outputs.logits
         
         # 如果教师模型和学生模型输出形状不匹配，对学生模型进行padding或对教师模型进行截断
+        # 模型输出的 维度 不同，也就是 vocab_size 不同，可能是因为学生模型的词表比教师模型的词表小
+        # [batch, seq_len, vocab_size] 
         if logits.shape[-1] != teacher_logits.shape[-1]:
             # gap = teacher_logits.shape[-1] - logits.shape[-1]
             # if gap > 0:
@@ -64,6 +68,7 @@ class KGTrainer(Trainer):
             teacher_logits = teacher_logits[:, :, :logits.shape[-1]]
         
         labels = inputs['labels']
+        # padding_id = 100 是因为 在训练时，通常会将输入序列进行 padding，以便在同一批次中处理不同长度的序列。padding_id 是用来标识这些 padding token 的特殊 token id。在计算损失时，我们希望忽略这些 padding token 对损失的贡献，因此需要知道它们的 id。
         kl = compute_fkl(logits, teacher_logits, labels, padding_id=-100, temp=2.0).mean()
         
         if self.if_use_entropy:
@@ -79,12 +84,15 @@ if __name__ == '__main__':
     # 学生模型
     model = AutoModelForCausalLM.from_pretrained("Qwen2.5-0.5B-Instruct")
     
+    # LoRA 配置，指定要微调的模块和参数
     lora_config = LoraConfig(
-    r=8,  
-    lora_alpha=256,  
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    lora_dropout=0.1, 
-    task_type=TaskType.CAUSAL_LM)
+        r=8,  
+        lora_alpha=256,  
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=0.1, 
+        task_type=TaskType.CAUSAL_LM
+    )
+
     # 使用lora方法训练
     model = get_peft_model(model, lora_config)
     model.cuda()
