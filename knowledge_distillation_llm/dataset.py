@@ -29,35 +29,51 @@ class SFTDataset(Dataset):
         return len(self.data)    
     
     def __getitem__(self, index):
+        # 取一条样本。数据为 Alpaca 风格：instruction（指令）+ input（可选补充输入）+ output（答案）
         line = self.data[index]
         instruction_text = line['instruction']
         input_text = line['input']
         output_text = line['output']
+        # query = 用户输入（指令 + 输入）；answer = 答案，末尾拼接 eos 标记“回答结束”
         query = instruction_text + input_text
         answer = output_text + self.tokenizer.eos_token
+        # 下面用 chat 模板把 query 包成对话（只放 user 一轮）；add_generation_prompt=True 会自动补上
+        # assistant 的起始标记，让模型处于“该开始生成回答”的状态
         messages = []
         messages.append({'role': 'user', 'content': query})   
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) 
         
+        # prompt 与 answer 分别编码后再拼接（分开编码，避免拼接处 token 边界被合并带来的偏差）
         prompt_input_ids = self.tokenizer.encode(prompt)
         answer_input_ids = self.tokenizer.encode(answer)
         
+        # 输入序列 = prompt + answer，整段一起喂给模型
         input_ids = prompt_input_ids + answer_input_ids
+        # 标签：prompt 部分置为 -100（忽略，不参与损失），只保留 answer 的真实 id -> 只学“怎么回答”，不学“怎么提问”
         labels = [-100] * len(prompt_input_ids) + answer_input_ids
+        # attention_mask：真实 token 为 1，稍后 padding 的位置补 0
         attention_mask = [1] * len(input_ids)
         text_len = len(input_ids)
         
+        # 一个 batch 中的样本长度不一致，统一 padding 到 max_seq_len
         if text_len > self.max_seq_len:
+            # 超长：从右侧截断（可能会截掉 answer 的尾部）
             input_ids = input_ids[:self.max_seq_len]
             labels = labels[:self.max_seq_len]
             attention_mask = attention_mask[:self.max_seq_len]
         else:
+            # 不足：右侧补 pad_token，labels 补 -100，attention_mask 补 0（这些位置都不参与前向/损失）
             input_ids = input_ids + [self.tokenizer.pad_token_id] * (self.max_seq_len - text_len)
             labels = labels + [-100] * (self.max_seq_len - text_len)
             attention_mask = attention_mask + [0] * (self.max_seq_len - text_len)
         
+        # 下面两行被注释掉，本意是做 next-token 预测的经典错位对齐：
+        #   input_ids 去掉最后一个、labels 去掉第一个，使 labels[t] 成为 input_ids[t] 的下一个 token。
+        # 但这里不需要：HuggingFace 的 CausalLM 在内部已经做了 logits[:-1] 与 labels[1:] 的对齐，
+        # 所以数据集直接返回对齐好的 input_ids / labels 即可。
         # input_ids = input_ids[:-1]
         # labels = labels[1:]
+        # 返回张量：input_ids（模型输入）、attention_mask（1=有效，0=padding）、labels（损失目标，-100 处忽略）
         return {'input_ids': torch.tensor(input_ids), 'attention_mask':torch.tensor(attention_mask), 'labels': torch.tensor(labels)}
     
 

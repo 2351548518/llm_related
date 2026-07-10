@@ -106,7 +106,7 @@ if __name__ == '__main__':
     lora_path = 'qwen2.5_7b/lora/sft'
     teacher_model = PeftModel.from_pretrained(teacher_model, lora_path)
     teacher_model.cuda()
-    teacher_model.eval()
+    teacher_model.eval() # 教师模型 是 不参与训练的，所以设置为 eval 模式，避免 dropout 等影响
     
     args = TrainingArguments(output_dir='./results', 
                             num_train_epochs=10, 
