@@ -1,0 +1,58 @@
+flowchart TD
+    subgraph 数据["① 数据准备"]
+        P["prompt_list 8 条问题"] --> PD["PromptDataset 套 chat 模板"]
+        PD --> PDL["prompts_dataloader batch=rollout_batch_size"]
+    end
+
+    subgraph 采样["② generate_samples rollout"]
+        PDL -->|"每 prompt x n_samples_per_prompt"| GEN["Actor.generate max_new_tokens=50"]
+        GEN --> SMP["Samples: seqs, attention_mask, action_mask, num_actions"]
+    end
+
+    subgraph 经验["③ generate_experiences no_grad/detach"]
+        SMP --> ACT["Actor 前向 -> action_log_probs OLD"]
+        SMP --> REF["Reference 前向 -> ref_action_log_probs"]
+        SMP --> CRT["Critic 前向 -> value V s_t"]
+        SMP --> DEC["batch_decode 成文本"]
+        DEC --> RM["Reward Model -> 标量 r"]
+
+        ACT --> KL["compute_approx_kl logp_a - logp_ref"]
+        REF --> KL
+        KL --> RW["compute_rewards -kl_ctl*kl + clip r 到最后 token"]
+        RM --> RW
+
+        CRT --> GAE["get_advantages_and_returns GAE 倒序 A_t returns_t"]
+        RW --> GAE
+
+        ACT --> EXP["Experience 全部 detach"]
+        REF --> EXP
+        CRT --> EXP
+        KL --> EXP
+        GAE --> EXP
+        RM --> EXP
+        RW --> EXP
+    end
+
+    subgraph 缓冲["④ 经验池"]
+        EXP --> BUF["ExperienceBuffer limit=100 滑窗"]
+        BUF --> DL["DataLoader + collate_fn batch=micro_train_batch_size"]
+        DL --> BI["BufferItem cat 成训练大 batch"]
+    end
+
+    subgraph 训练["⑤ train_step max_epochs=5 轮重用"]
+        BI --> TACT["Actor 重新前向 -> new action_log_probs"]
+        TACT --> PL{"compute_policy_loss ratio=exp new-old clip 0.8 1.2 .A min surr1 surr2"}
+        BI -->|"old_log_probs advantages"| PL
+        PL --> PB["policy_loss.backward optimizer_actor.step"]
+
+        BI --> TCRT["Critic 重新前向 -> new values"]
+        TCRT --> VL{"compute_value_loss values-returns^2 MSE"}
+        BI -->|"old_values returns"| VL
+        VL --> VB["value_loss.backward optimizer_critic.step"]
+
+        PB --> TB[("TensorBoard policy_loss 曲线")]
+        VB --> TB
+    end
+
+    BUF -.->|"buffer.clear 下一批新经验"| PDL
+    PB -.->|"参数更新后"| GEN
