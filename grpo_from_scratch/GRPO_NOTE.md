@@ -2635,6 +2635,8 @@ $$
 
 ![alt text](image-1.png)
 
+![alt text](image-2.png)
+
 代码里也是如此：
 ```
 old_action_log_probs = self.get_action_log_probs(
