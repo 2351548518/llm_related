@@ -19,19 +19,64 @@ GRPO（Group Relative Policy Optimization）保留了 PPO 的 clipped surrogate 
 
 ## 2. 符号约定
 
+### 2.1 问题、回答与 token
+
 | 符号 | 含义 |
 | --- | --- |
-| $q$ | 输入问题（prompt） |
-| $o=(o_1,\ldots,o_{|o|})$ | 模型生成的一条完整回答 |
-| $o_{<t}$ | 第 $t$ 个 token 之前的回答前缀 |
-| $\pi_\theta$ | 当前正在训练的策略模型 |
-| $\pi_{\mathrm{old}}$ | 采样回答时使用的旧策略模型 |
-| $\pi_{\mathrm{ref}}$ | 冻结的参考模型，用于计算 KL 约束 |
-| $G$ | 同一道题生成的回答数量（group size） |
-| $\epsilon$ | PPO/GRPO 的裁剪系数 |
-| $\beta$ | KL 惩罚强度；$\beta=0$ 表示不使用 KL |
+| $q$ | 一条具体的输入问题（prompt） |
+| $O$ | 模型完整输出的随机变量或所有可能回答构成的输出空间 |
+| $o_i=(o_{i,1},\ldots,o_{i,\lvert o_i\rvert})$ | 针对问题 $q$ 实际采样到的第 $i$ 条完整回答 |
+| $\lvert o_i\rvert$ | 第 $i$ 条回答包含的有效 completion token 数 |
+| $o_{i,t}$ | 第 $i$ 条回答的第 $t$ 个 token |
+| $o_{i,<t}=(o_{i,1},\ldots,o_{i,t-1})$ | 生成第 $t$ 个 token 之前的回答前缀 |
+| $G$ | 同一道题采样的回答数量（group size） |
+| $R_i$ | 第 $i$ 条完整回答获得的序列级奖励 |
+| $\widehat A_i$ | 由同组奖励标准化得到的第 $i$ 条回答的相对优势 |
 
-需要特别区分后文中的两个概率比率：
+大写 $O$ 和小写 $o_i$ 的区别是：
+
+- $O$ 表示“可能生成什么”的随机输出或输出空间；
+- $o_i$ 表示从该分布中实际采样得到的一条具体回答。
+
+例如，下面的写法表示对同一个问题独立采样 $G$ 条回答：
+
+$$
+o_i\overset{\mathrm{i.i.d.}}{\sim}
+\pi_{\mathrm{old}}(\cdot\mid q),
+\qquad i=1,\ldots,G.
+$$
+
+有些公式也写成 $\pi_{\mathrm{old}}(O\mid q)$，但
+$\pi_{\mathrm{old}}(\cdot\mid q)$ 更清楚：这里描述的是完整回答的条件分布，
+而不是某一条名为 $O$ 的具体回答。
+
+### 2.2 三个策略模型
+
+| 符号 | 是否更新 | 作用 |
+| --- | --- | --- |
+| $\pi_\theta$ | 是 | 当前正在训练、参与反向传播的策略模型 |
+| $\pi_{\mathrm{old}}$ | 一个 rollout 周期内冻结 | 生成训练回答，并作为 PPO/GRPO 重要性比率的分母 |
+| $\pi_{\mathrm{ref}}$ | 始终冻结 | 约束当前策略不要偏离初始模型过远；仅在启用 KL 惩罚时需要 |
+
+必须区分 $\pi_{\mathrm{old}}$ 和 $\pi_{\mathrm{ref}}$：
+
+- $\pi_{\mathrm{old}}$ 是当前策略在采样前保存的快照，会随训练周期更新；
+- $\pi_{\mathrm{ref}}$ 通常是训练开始时保存的初始/SFT 模型，训练期间保持不变；
+- 二者在训练刚开始时可能参数相同，但承担的算法职责不同。
+
+### 2.3 优化相关符号
+
+| 符号 | 含义 |
+| --- | --- |
+| $\rho_{i,t}(\theta)$ | 当前策略与旧策略对已采样 token 给出的概率之比 |
+| $\epsilon$ | PPO/GRPO 的裁剪半径，裁剪区间为 $[1-\epsilon,1+\epsilon]$ |
+| $\beta$ | KL 惩罚强度；$\beta=0$ 表示不使用参考模型 KL 约束 |
+| $D_{\mathrm{KL}}$ 或 $k_3$ | 当前策略相对参考策略的 KL 偏离度或其逐 token 估计 |
+| $\varepsilon_{\mathrm{num}}$ | 防止标准差为零的数值稳定项，不是裁剪半径 $\epsilon$ |
+
+### 2.4 两类概率比率不要混用
+
+PPO/GRPO 策略目标使用的是**当前策略与旧策略**之间的重要性采样比率：
 
 $$
 \rho_{i,t}(\theta)
@@ -40,7 +85,29 @@ $$
 {\pi_{\mathrm{old}}(o_{i,t}\mid q,o_{i,<t})}
 $$
 
-这是 PPO/GRPO 策略目标中的**重要性采样比率**。KL 一节中的 $r=\pi_{\mathrm{ref}}/\pi_\theta$ 是另一个比率，二者不要混用。
+它回答的是：
+
+> 对同一个已采样 token，当前策略给出的概率相对采样时提高或降低了多少？
+
+后文估计 KL 时还会出现**参考策略与当前策略**之间的比率：
+
+$$
+r_{i,t}^{\mathrm{KL}}
+=
+\frac{\pi_{\mathrm{ref}}(o_{i,t}\mid q,o_{i,<t})}
+{\pi_\theta(o_{i,t}\mid q,o_{i,<t})}.
+$$
+
+二者的用途和分母完全不同：
+
+| 比率 | 比较对象 | 主要用途 |
+| --- | --- | --- |
+| $\rho_{i,t}=\pi_\theta/\pi_{\mathrm{old}}$ | 当前策略 vs. 旧策略 | PPO/GRPO surrogate objective 与裁剪 |
+| $r_{i,t}^{\mathrm{KL}}=\pi_{\mathrm{ref}}/\pi_\theta$ | 参考策略 vs. 当前策略 | 估计当前策略偏离参考策略的程度 |
+
+记忆方法：
+
+> **old 管“这批数据是谁采的”，ref 管“模型不要偏离谁太远”。**
 
 ---
 
