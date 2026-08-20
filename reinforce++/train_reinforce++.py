@@ -161,7 +161,7 @@ class ReinForcePlusPlusTrainer(RLOOTrainer):
                 queries = processing_class.apply_chat_template(queries, tokenize=True, add_generation_prompt=True, return_tensors='pt', padding=True)
                 queries = queries.to(device)
                 
-                
+                # 是否 使用 baselin, reinforce
                 if args.use_baseline:
                     queries = queries.repeat(args.rloo_k, 1)
                     answers = answers * args.rloo_k
@@ -227,9 +227,7 @@ class ReinForcePlusPlusTrainer(RLOOTrainer):
                         
                         for i, rm in enumerate(reward_model):
                             if isinstance(rm, nn.Module):
-                                _, score, _ = get_reward(
-                            rm, postprocessed_query_response, processing_class.pad_token_id, context_length
-                        )
+                                _, score, _ = get_reward(rm, postprocessed_query_response, processing_class.pad_token_id, context_length)
                                 scores_[:, i] = score
                             else:
                                 response_text = processing_class.batch_decode(postprocessed_response, skip_special_tokens=True)
@@ -279,11 +277,17 @@ class ReinForcePlusPlusTrainer(RLOOTrainer):
                 # Compute KL divergence
                 kl = logprobs - ref_logprobs
 
+                """
+                对奖励 做标准化(不必要)
+                """
                 # reinforce++
                 if args.normalize_reward:
                     scores = (scores - scores.mean()) / (scores.std() + 1e-8)
                     scores = torch.clamp(scores, -args.reward_clip_range, args.reward_clip_range)
 
+                """
+                reinforce++
+                """
                 # reinforce++使用token粒度的kl散度
                 if args.token_level_kl:
                     # Token-level KL penalty: apply KL penalty per token
@@ -308,6 +312,10 @@ class ReinForcePlusPlusTrainer(RLOOTrainer):
                 
                 
                 # 类似于grpo，使用一个组的平均奖励计算baseline，同时去掉了std
+                """
+                reinforce++ - baseline
+                $$A_{q, o_t} &= R_{q, o_t} - \text{mean}_{\text{group}}(R_{q, o_t}) $$
+                """
                 if args.use_baseline:
                 
                     rlhf_reward = rlhf_reward.reshape(args.rloo_k, -1)
@@ -318,6 +326,7 @@ class ReinForcePlusPlusTrainer(RLOOTrainer):
                 
 
                 # reinforce++会使用一个batch内的数据对优势进行归一化
+                # K1 散度
                 if args.normalize_advantage:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
