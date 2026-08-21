@@ -97,7 +97,8 @@ class KGTrainer(Trainer):
           其中 2 表示 [positive_score, negative_score]。
         - student_scores 最终形状：[2, 2]，与 labels 一一对应。
         """
-        loss_fct = nn.KLDivLoss(reduction="batchmean")
+        loss_fct = nn.KLDivLoss(reduction="batchmean") # KL 散度 损失
+
         # labels 是教师相似度，不需要传给学生模型的 forward。
         labels = inputs.pop("labels")
         batch_size = inputs["input_ids"].shape[0]
@@ -107,6 +108,7 @@ class KGTrainer(Trainer):
         # sample_num = 1(query) + 1(positive) + negative_num。
         # 模型只接受二维 token 序列，所以把前两个维度展平：
         # [B, S, L] -> [B*S, L]。
+        # labels 、input_ids 都是 [B*S, L]。
         inputs = {key: inputs[key].reshape(-1, seq_len) for key in inputs}
 
         # outputs.last_hidden_state.shape = [B*S, L, H]。
