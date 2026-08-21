@@ -166,3 +166,101 @@ return selected_logits - logsumexp_values
 mini_completion_mask = mini_attention_mask[:, prompt_ids.shape[-1]:]
 ```
 
+这行代码从完整序列的 attention mask 中，只截取“学生生成回答”部分的有效 token mask。
+
+```python
+mini_completion_mask = mini_attention_mask[
+    :, prompt_ids.shape[-1]:
+]
+```
+
+假设完整序列是：
+
+```text
+[prompt | completion | padding]
+```
+
+对应：
+
+```python
+mini_attention_mask = [
+    [1, 1, 1, 1,  1, 1, 1, 0, 0]
+     └─prompt──┘   └completion──┘
+]
+```
+
+如果 prompt 长度为 4：
+
+```python
+prompt_ids.shape[-1] == 4
+```
+
+切片得到：
+
+```python
+mini_completion_mask = [
+    [1, 1, 1, 0, 0]
+]
+```
+
+含义是：
+
+- `1`：有效的 completion token，需要计算奖励和 loss。
+- `0`：生成结束后的 padding，不参与奖励和 loss。
+
+它主要用在三个地方。
+
+计算有效 token 的平均奖励：
+
+```python
+reward_mean = (
+    reward * mini_completion_mask
+).sum(dim=1, keepdim=True) / mini_completion_mask.sum(
+    dim=1, keepdim=True
+)
+```
+
+例如：
+
+```python
+reward = [-0.2, -0.4, -0.6, -0.9, -0.9]
+mask   = [   1,    1,    1,    0,    0]
+```
+
+实际平均值只计算前三个：
+
+```text
+reward_mean = (-0.2 - 0.4 - 0.6) / 3 = -0.4
+```
+
+屏蔽 padding 位置的 advantage：
+
+```python
+adv = adv * mini_completion_mask.float()
+```
+
+以及计算最终 loss：
+
+```python
+token_loss_per_seq = (
+    pg_loss_max * micro_completion_mask
+).sum(dim=1) / micro_completion_mask.sum(dim=1)
+```
+
+因此，这行代码可以理解为：
+
+> 标记学生回答中哪些 token 是真实生成内容，哪些只是为了凑齐 batch 长度而添加的 padding。
+
+这里使用 `prompt_ids.shape[-1]` 只是为了取得固定 prompt 长度。例如 prompt 被 padding 到 512，则相当于：
+
+```python
+mini_completion_mask = mini_attention_mask[:, 512:]
+```
+
+需要注意，如果 tokenizer 的 `pad_token_id` 和 `eos_token_id` 相同，那么前面通过：
+
+```python
+attention_mask = (sequences != pad_token_id).long()
+```
+
+构造 mask 时可能连 EOS 也屏蔽掉，需要单独处理。
