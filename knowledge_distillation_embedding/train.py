@@ -65,7 +65,16 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
 
 class KGTrainingArguments(TrainingArguments):
     """在 Hugging Face TrainingArguments 上附加蒸馏温度。"""
+    """
+    https://zhuanlan.zhihu.com/p/504323465
+    温度系数的作用
 
+    温度系数T主要用于调整softmax函数的输出平滑度。在知识蒸馏中，教师模型的softmax输出会除以一个温度系数T，得到soft target，学生模型的softmax输出也会除以同样的T，然后计算交叉熵损失。这种做法的目的是放大类别之间的相似信息，从而让学生模型更好地学习教师模型的泛化能力。
+
+    温度系数的选择
+
+    温度系数T的选择对知识蒸馏的效果有重要影响。一般来说，T的取值通常大于1，这样可以使softmax输出的概率分布更加平滑，减少过度自信的问题。例如，当T=1时，softmax输出的概率差距较大，而当T=20时，概率差距变小，各类别的输出被同等考量。
+    """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # T 越大，softmax 分布通常越平滑，学生能看到更多候选之间的相对关系。
