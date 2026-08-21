@@ -1,3 +1,9 @@
+"""直接优化反向 KL 的 on-policy 蒸馏。
+
+与 ``train.py`` 使用固定标准答案不同，本脚本先让学生根据 prompt 生成回答，
+再让教师和学生对这些“学生实际会访问到的状态”打分，最后最小化反向 KL。
+"""
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, DefaultDataCollator
 from peft import LoraConfig, get_peft_model, TaskType
 from peft import PeftModel
@@ -11,6 +17,7 @@ from utils import compute_rkl
 
 
 class KGTrainer(Trainer):
+    """在学生实时生成的 completion 上优化 ``KL(student || teacher)``。"""
     
     def __init__(
         self,
@@ -40,13 +47,21 @@ class KGTrainer(Trainer):
             optimizers=optimizers,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
+
+        # 教师模型
         self.teacher_model = teacher_model
 
     
-    
+    # 学生模型 rollout 采样
     @torch.no_grad()
     def generate_sequences(self, input_ids, attention_mask):
-        
+        """
+        用当前学生策略采样回答，生成过程本身不保留计算图。
+
+        例：输入固定为 512 个位置、模型生成 20 个 token，则返回的
+        ``sequences`` 形状约为 ``[batch, 532]``，前 512 位仍是 prompt。
+        """
+
         self.model.eval()
         sequences = self.model.generate(input_ids=input_ids, 
                                       attention_mask=attention_mask,
@@ -63,27 +78,36 @@ class KGTrainer(Trainer):
         return sequences
     
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """完成一次“学生生成 -> 教师打分 -> 反向 KL”的训练步骤。"""
         
         prompt_ids = inputs["input_ids"].to(self.model.device)
         prompt_mask = inputs["attention_mask"].to(self.model.device)
-        sequences = self.generate_sequences(prompt_ids, prompt_mask)
+        sequences = self.generate_sequences(prompt_ids, prompt_mask) # 学生模型采样
+
         attention_mask = (sequences != self.tokenizer.pad_token_id).long()
-        logits = model(sequences, attention_mask=attention_mask).logits[:, prompt_ids.shape[-1]:]
+        # 只保留 completion 区间。假设 prompt_len=512、总长度=532，切片后长度为20。
+        # 注意：CausalLM 的 logits[t] 预测 token[t+1]。当前切片和 completion_ids
+        # 使用相同起点，会错开一个 token；严格实现应使用前一位置的 logits 对齐。
+        logits = model(sequences, attention_mask=attention_mask).logits[:, prompt_ids.shape[-1]:] # 只取生成的 部分
         
         loss = None
+
         with torch.no_grad():
             teacher_outputs = self.teacher_model(sequences, attention_mask=attention_mask)
+        teacher_logits = teacher_outputs.logits[:, prompt_ids.shape[-1]:] # 只取生成的 部分
         
-        teacher_logits = teacher_outputs.logits[:, prompt_ids.shape[-1]:]
-        
-        
+        """
+        Qwen 4B 模型 和 小模型 词表有一些细微差别
+        """
         if logits.shape[-1] != teacher_logits.shape[-1]:
-           
-            teacher_logits = teacher_logits[:, :, :logits.shape[-1]]
+            teacher_logits = teacher_logits[:, :, :logits.shape[-1]] # 直接进行截断
         
+        # completion_ids 是学生自己采样的回答，prompt 部分不参加本次 KL。
         completion_ids = sequences[:, prompt_ids.shape[-1]:]
-        kl = compute_rkl(logits, teacher_logits, completion_ids, padding_id=self.tokenizer.pad_token_id, reduction="mean")
-        
+        # 计算反向kl散度
+        kl = compute_rkl(logits, teacher_logits,  completion_ids, padding_id=self.tokenizer.pad_token_id, reduction="mean")
+
+        # 求平均 作为损失
         loss = kl.mean()
         
         return loss
@@ -143,7 +167,3 @@ if __name__ == '__main__':
     trainer.train(resume_from_checkpoint=False)
     trainer.save_model('./saves')
     trainer.save_state()
-    
-    
-      
-    

@@ -1,10 +1,8 @@
 # On-Policy Distillation
 
-# On Policy Distillation
-
 ## 🎯 On Policy vs Off Policy
 
-### Off Policy（最传统、经典的知识蒸馏）
+### Off Policy（最传统、经典的知识蒸馏） 异策略知识蒸馏
 
 学生模型的训练数据来自于真实数据或者由教师模型生成，即：
 
@@ -12,11 +10,11 @@
 
 **优势：** 数据可复用，训练资源占用较低（教师模型数据可提前生成，无需在训练过程中生成）。
 
-**劣势：** 只是一味的学习教师模型的分布，当教师模型产生的数据多样性或者质量较低，会导致学生模型泛化性能很差（推理与训练不一致，训练在教师模型的分布上学习，推理时在自己分布上生成）。
+**劣势：** 只是一味的学习教师模型的分布，当教师模型产生的**数据多样性或者质量较低**，会导致学生模型泛化性能很差（推理与训练不一致，训练在教师模型的分布上学习，推理时在自己分布上生成）。
 
-### On Policy
+### On Policy 同策略知识蒸馏
 
-学生模型的训练数据由学生模型自己生成，即：
+学生模型的训练数据由**学生模型自己生成**，即：
 
 > 学生模型自己与环境交互 → 生成数据 → 教师模型纠正学生模型分布。
 
@@ -49,8 +47,10 @@ adv = reward - reward_mean
 到这里，就可以使用策略梯度算法进行优化了：
 
 ```python
+# 重要性采样的权重
 logprobs_diff = student_probs - old_student_probs
 ratio = torch.exp(logprobs_diff)
+# 优势 * 权重
 pg_losses = -adv * ratio
 pg_losses2 = -adv * torch.clamp(
     ratio,
@@ -64,5 +64,5 @@ pg_loss_max = torch.max(pg_losses, pg_losses2)
 
 所以对于 on policy distillation，可以有两种做法进行优化：
 
-- 将 KL 散度作为直接目标进行优化（KL 散度直接作为损失）；
-- 将 KL 散度作为奖励信号，使用策略梯度算法进行优化。
+- 将 KL 散度作为**直接目标**进行优化（KL 散度直接作为损失）；off policy也是这么做的
+- 将 KL 散度作为奖励信号，使用策略梯度算法进行优化。 RL 是这么做的

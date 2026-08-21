@@ -1,3 +1,12 @@
+"""训练数据集定义。
+
+输入文件采用 Alpaca 风格的 JSON 数组，例如：
+``[{"instruction": "计算 1+1", "input": "", "output": "2"}]``。
+
+``SFTDataset`` 返回“问题+标准答案”，用于离线蒸馏；``OnPolicyDataset``
+只返回问题，因为答案需要在训练过程中由当前学生模型自己生成。
+"""
+
 import math
 from typing import List, Optional, Tuple, Union
 import torch
@@ -16,6 +25,17 @@ from transformers import PretrainedConfig
 from transformers import Trainer, TrainingArguments, AutoModelForCausalLM, AutoTokenizer, DefaultDataCollator, DataCollatorForTokenClassification, AutoConfig
 
 class SFTDataset(Dataset):
+    """构造监督微调/离线蒸馏样本。
+
+    假设 chat prompt 编码后有 4 个 token，答案有 2 个 token，且
+    ``max_seq_len=8``，则概念上的结果为：
+
+    * input_ids：4 个 prompt token + 2 个答案 token + 2 个 pad；
+    * labels：``[-100, -100, -100, -100, answer_id, eos_id, -100, -100]``；
+    * attention_mask：``[1, 1, 1, 1, 1, 1, 0, 0]``。
+
+    ``-100`` 是 CausalLM 默认忽略的标签值，所以监督损失只覆盖答案部分。
+    """
     def __init__(self, data_path, tokenizer, max_seq_len):
         super().__init__()
         self.data_path = data_path
@@ -80,6 +100,13 @@ class SFTDataset(Dataset):
 
 
 class OnPolicyDataset(Dataset):
+    """构造 on-policy rollout 所需的 prompt。
+
+    这里使用左侧 padding，因为 decoder-only 模型批量生成时，每条 prompt
+    最右侧都应是真实 token。例如 prompt 为 ``[21, 22, 23]``，
+    ``max_prompt_length=5``，返回 ``[pad, pad, 21, 22, 23]``，对应 mask 为
+    ``[0, 0, 1, 1, 1]``。JSON 中的 output 不会读取，回答由学生实时生成。
+    """
     def __init__(self, data_path, tokenizer, args=None):
         super().__init__()
         self.data_path = data_path
