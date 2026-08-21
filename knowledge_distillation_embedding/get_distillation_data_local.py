@@ -87,7 +87,23 @@ def main():
         q = data['query']
         pos = data['positive']
         neg = data['negative']
-        
+
+        """
+        {
+            "query": "Crime news analysis: Location and story detection",
+            "positive": "An overview on crime prediction methods",
+            "negative": [
+                "Wind and Tall Buildings – Negatives and Positives"
+            ]
+        },
+        {
+            "query": "Crime news analysis: Location and story detection",
+            "positive": "Detecting and investigating crime by means of data mining: a general crime matching framework",
+            "negative": [
+                "A Survey of Research into Legacy System Migration"
+            ]
+        },
+        """
         # 输入顺序非常重要。例如 neg=[n1, n2] 时，编码顺序是
         # [q, pos, n1, n2]，后面生成的 label 会沿用这一候选顺序。
         if isinstance(neg, str):

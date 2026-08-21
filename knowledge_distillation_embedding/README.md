@@ -56,3 +56,8 @@ graph TD
 https://huggingface.co/datasets/Bibek/scidocs-reranking-train
 
 https://pan.quark.cn/s/4c82c4d253ac
+
+
+![alt text](image.png)
+
+负样本 10个 的时候 效果比较好

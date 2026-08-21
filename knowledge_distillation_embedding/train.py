@@ -123,12 +123,18 @@ class KGTrainer(Trainer):
         # 其余向量依次是 positive 和 negatives：[B, 1+N, H]。
         pos_neg_embeddings = embeddings[:, 1:]
 
+        """
+        计算学生模型的 student_log_probs
+        """
         # 通过广播计算 query 与全部候选的相似度，得到 [B, 1+N]。
         student_scores = similarity(query_embeddings, pos_neg_embeddings, dim=2)
         # 温度缩放后转换为 log probability，满足 KLDivLoss 对 input 的要求。
         student_scores = student_scores / args.temperature
         student_log_probs = torch.log_softmax(student_scores, dim=1)
 
+        """
+        教师模型的 teacher_probs
+        """
         # 教师分数使用相同温度转换为普通 probability，作为 KLDivLoss target。
         teacher_scores = labels / args.temperature
         teacher_probs = torch.softmax(teacher_scores, dim=1)
@@ -146,11 +152,11 @@ if __name__ == '__main__':
     # LoRA 只为列出的线性投影层增加低秩可训练参数，原始模型参数保持冻结。
     # r=8 是低秩矩阵的秩，lora_alpha=256 控制 LoRA 更新的缩放强度。
     lora_config = LoraConfig(
-    r=8,  
-    lora_alpha=256,  
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    lora_dropout=0.1, 
-    task_type=TaskType.SEQ_CLS)
+        r=8,  
+        lora_alpha=256,  
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=0.1, 
+        task_type=TaskType.SEQ_CLS)
     # 把 LoRA adapter 注入学生模型。
     model = get_peft_model(model, lora_config)
     model.cuda()

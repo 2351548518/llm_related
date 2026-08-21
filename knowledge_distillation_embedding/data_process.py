@@ -64,7 +64,7 @@ def process_data(data_path, output_path, split='train', negative_num=10):
 if __name__ == '__main__':
     # 默认读取 Hugging Face 上的 SciDocs 数据，并为每个正样本搭配 1 个负样本。
     # Windows 路径使用原始字符串 r'...'，避免反斜杠被解释成转义字符。
-    process_data('Bibek/scidocs-reranking-train', r'C:\q00520820\Learn_MLLMs\llm_related\knowledge_distillation_embedding\processed_data', negative_num=1)
+    process_data('Bibek/scidocs-reranking-train', r'/data2/home/jiapeng2/code/LLM/llm_related/knowledge_distillation_embedding/processed_data', negative_num=1)
                
             
             
