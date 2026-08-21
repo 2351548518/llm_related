@@ -37,7 +37,7 @@ graph TD
 - generator_config.json
 - modules.json
 
-原因是qwen3-embedding原始模型使用last token的向量作为句子向量，在训练中使用的也是last token，如果缺少上述文件，使用sentence_transformers评估加载模型时会默认使用所有token的平均向量作为句子向量，训练和测试不一致会导致测试性能低于原始模型
+原因是qwen3-embedding原始模型使用**last token的向量**作为句子向量，在训练中使用的也是last token，如果缺少上述文件，使用sentence_transformers评估加载模型时会默认使用**所有token的平均向量**作为句子向量，训练和测试不一致会导致测试性能低于原始模型
 
 ## 模型效果
 
@@ -52,4 +52,7 @@ graph TD
 | 蒸馏后（LoRA，负样本数1，T=1，教师模型8B）   | 0.8719    | 0.9620    | 0.9116    |
 
 ## 模型数据连接
+
+https://huggingface.co/datasets/Bibek/scidocs-reranking-train
+
 https://pan.quark.cn/s/4c82c4d253ac

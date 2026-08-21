@@ -1,3 +1,18 @@
+"""使用本地 vLLM Embedding 模型生成蒸馏软标签。
+
+脚本会让教师模型分别编码 query、positive 和 negative，然后计算 query 与
+每个候选文本的余弦相似度。输出的相似度列表就是学生训练时使用的软标签。
+
+输入示例：
+    {"query": "q", "positive": "p", "negative": ["n1", "n2"]}
+
+输出示例：
+    {"query": "q", "positive": "p", "negative": ["n1", "n2"],
+     "label": [0.87, 0.25, 0.11]}
+
+label 的顺序始终是 [positive_score, negative_1_score, ...]。
+"""
+
 from vllm import LLM, SamplingParams
 import torch
 import torch.nn.functional as F
@@ -7,9 +22,15 @@ import argparse
 import os
 
 def similarity(emb1: torch.Tensor, emb2: torch.Tensor):
+    """计算两组向量的余弦相似度。
+
+    例如 emb1.shape=[1, hidden_size]、emb2.shape=[10, hidden_size] 时，
+    PyTorch 会广播 emb1，返回包含 10 个相似度的张量。
+    """
     return F.cosine_similarity(emb1, emb2)
 
 def parse_args():
+    """定义教师模型、显存占用比例以及输入输出路径。"""
     parser = argparse.ArgumentParser(description="Process embedding data for knowledge distillation using vLLM")
     
 
@@ -36,6 +57,8 @@ def parse_args():
 def main():
     args = parse_args()
     
+    # 教师输出目录不存在时自动创建。例如 output_file 为
+    # train_data/train.json 时，这里会创建 train_data。
     output_dir = os.path.dirname(args.output_file)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -55,25 +78,33 @@ def main():
     
     train_datas = []
     
-    # 处理数据
+    # 当前实现逐条处理训练样本；每次 embed 调用内部会同时编码当前样本的
+    # query、positive 和所有 negative。
     print("Processing embeddings...")
     for data in tqdm.tqdm(train_texts, total=len(train_texts)):
+
+        # neg 既可能是单个字符串，也可能是字符串列表。
         q = data['query']
         pos = data['positive']
         neg = data['negative']
         
-        # 获取嵌入
+        # 输入顺序非常重要。例如 neg=[n1, n2] 时，编码顺序是
+        # [q, pos, n1, n2]，后面生成的 label 会沿用这一候选顺序。
         if isinstance(neg, str):
             outputs = llm.embed([q, pos, neg], use_tqdm=False)
         else:
             outputs = llm.embed([q, pos] + neg, use_tqdm=False)
         embeddings = [output.outputs.embedding for output in outputs]
         
-        # 转换为tensor并计算相似度
+        # 假设 embedding 维度为 H，且有 N 个负样本：
+        # query_embedding.shape = [1, H]
+        # pos_embedding.shape   = [1, H]
+        # neg_embedding.shape   = [N, H]
         query_embedding = torch.tensor(embeddings[0], dtype=torch.float32).unsqueeze(0)
         pos_embedding = torch.tensor(embeddings[1], dtype=torch.float32).unsqueeze(0)
         neg_embedding = torch.tensor(embeddings[2:], dtype=torch.float32)
         
+        # pos_sim.shape=[1]，neg_sim.shape=[N]；拼接后 label.shape=[1+N]。
         pos_sim = similarity(query_embedding, pos_embedding)
         neg_sim = similarity(query_embedding, neg_embedding)
         sim = torch.cat([pos_sim, neg_sim], dim=0)
@@ -86,7 +117,7 @@ def main():
             "label": label
         })
     
-    # 保存结果
+    # 保存带有教师软标签的数据，供 dataset.py 和 train.py 使用。
     print(f"Saving results to {args.output_file}...")
     with open(args.output_file, "w", encoding='utf-8') as f:
         json.dump(train_datas, f, ensure_ascii=False, indent=4)
