@@ -1,32 +1,4 @@
-"""
-一个用于学习 Multi-head Latent Attention（MLA）的简化实现。
 
-本文统一使用下面的符号描述张量形状：
-    B  = batch size
-    S  = 当前一次 forward 输入的 token 数
-    T  = KV Cache 中已经保存的 token 总数
-    H  = 注意力头数 n_heads
-    Cq = Query 的低秩维度 q_lora_rank
-    Ckv= Key/Value 共享的低秩维度 kv_lora_rank
-    Dn = 每个头不使用 RoPE 的 Q/K 维度 qk_nope_head_dim
-    Dr = 每个头使用 RoPE 的 Q/K 维度 qk_rope_head_dim
-    Dv = 每个头的 Value 维度 v_head_dim
-
-main 中的参数例子：
-    B=4, S=100, H=16, Cq=128, Ckv=64, Dn=256, Dr=48, Dv=256
-    因而每个头的 Q/K 总维度为 Dn + Dr = 304。
-
-MLA 的关键思想：不必缓存每个注意力头完整的 K 和 V，而是缓存共享的低维
-表示 Ckv。计算时利用矩阵乘法结合律“吸收”升维矩阵，从而减少 KV Cache：
-
-    普通方式：每个 token 缓存 H * ((Dn + Dr) + Dv)
-              = 16 * (304 + 256) = 8960 个数
-    压缩方式：每个 token 缓存 Ckv + Dr
-              = 64 + 48 = 112 个数
-
-这个文件偏教学用途。代码中保留了原实现的计算逻辑，并在相应位置标出了会影响
-直接运行或增量解码的注意事项。
-"""
 
 import torch
 import torch.nn as nn
@@ -35,16 +7,6 @@ import math
 
 # RMS 归一化：只根据均方根缩放，不像 LayerNorm 那样减去均值。
 class RMSNorm(nn.Module):
-    """
-    对最后一个维度执行：
-
-        RMSNorm(x) = weight * x / sqrt(mean(x^2) + eps)
-
-    例：忽略 eps 和可学习参数 weight，x=[3, 4] 时：
-        mean(x^2) = (9 + 16) / 2 = 12.5
-        输出约为 [3/sqrt(12.5), 4/sqrt(12.5)] = [0.8485, 1.1314]
-    """
-
     def __init__(self, hidden_size, eps=1e-6):
         
         super().__init__()
@@ -62,23 +24,10 @@ class RMSNorm(nn.Module):
     
     
 def rotate_half(x):
-    """
-    将最后一维分成相等的两半，并完成 RoPE 所需的 90 度旋转。
-
-    例：x=[x0, x1, x2, x3]
-        x1=[x0, x1], x2=[x2, x3]
-        返回 [-x2, -x3, x0, x1]
-
-    因为使用 chunk(2)，RoPE 维度应该是偶数。
-    """
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotate_pos_emb(q, k, cos, sin, unsqueeze_dim=2):
-    """对 Q、K 的 RoPE 部分应用同一组旋转位置编码。"""
-
-    # 原 cos/sin 为 [1, S, Dr]；插入 head 维后变成 [1, S, 1, Dr]。
-    # 它们随后可广播到 q=[B,S,H,Dr] 和 k=[B,S,1,Dr]。
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
 
@@ -119,26 +68,6 @@ class RotaryEmbedding(nn.Module):
 # ====================================================================================================
 
 class MLA(nn.Module):
-    """
-    Multi-head Latent Attention 的教学实现。
-
-    两种 mode：
-        naive：先把压缩 KV 还原成每个头的完整 K/V，再计算注意力；缓存完整 K/V。
-        其他值：使用权重吸收（weight absorption）直接在压缩空间计算；缓存压缩 KV。
-
-    输入：
-        x         [B, S, dim]
-        start_pos 当前输入在整段序列中的起始位置
-        mask      可选的加性注意力掩码 [B, S, T]
-
-    输出：
-        [B, S, dim]
-
-    start_pos 示例：
-        首次预填充 100 个 token：start_pos=0,   S=100, 应写入 cache[0:100]
-        再生成第 101 个 token：start_pos=100, S=1,   应写入 cache[100:101]，
-        且新 Query 应与 cache[0:101] 中的所有 Key 计算注意力。
-    """
 
     def __init__(self,
                 dim,
@@ -177,27 +106,13 @@ class MLA(nn.Module):
         self.q_norm = RMSNorm(self.q_lora_rank)
         # 例：[B,S,128] -> [B,S,16*(256+48)] = [B,S,4864]。
         self.wq_b = nn.Linear(self.q_lora_rank, self.n_heads * self.qk_head_dim) # q的升维矩阵
-        # 参数量变化: 4096*128+128*4864 = 524,288 + 622592 = 1,146,880    4096*4864 = 19,922,944
+
         
-        # ---------------------- Key/Value 的联合压缩 ------------------------
-        # 一次投影同时生成：
-        #   1. 共享的压缩 KV（Ckv 维）；
-        #   2. 单独用于位置编码的 K（Dr 维）。
-        # 例：[B,S,4096] -> [B,S,64+48] = [B,S,112]。
-        """
-        kv  ：[B, S, 64]  压缩后的 K/V 公共表示
-        k_pe：[B, S, 48]  用于 RoPE 的 Key
-        """
+        # ---------------------- Key/Value 的联合压缩 
         self.wkv_a = nn.Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim) # kv的降维矩阵 生成“压缩 KV + 共享的位置 Key”
         # nn.Linear(self.dim, self.kv_lora_rank)
         # nn.Linear(self.dim, self.qk_rope_head_dim)
         self.kv_norm = RMSNorm(self.kv_lora_rank)
-        # 将压缩 KV 解压为每个头的 K_nope 和 V。
-        # 例：[B,S,64] -> [B,S,16*(256+256)] = [B,S,8192]。
-        """
-        K_nope：不使用 RoPE 的 Key 内容部分
-        V     ：Value
-        """
         self.wkv_b = nn.Linear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim)) # kv的升维矩阵 生成“每个注意力头的内容 Key + Value”
         
         # 拼接 H 个头的注意力结果后，再投影回模型隐藏维度。
@@ -229,143 +144,107 @@ class MLA(nn.Module):
     def forward(self, x, start_pos: int, mask=None):
         
         bs, seq_len, _ = x.shape
-        # end_pos 表示本次输入写入缓存后的末尾位置（左闭右开区间）。
-        # 例：start_pos=100、seq_len=1，则 end_pos=101，写入 cache[100:101]。
-        # 注意：原代码这里写成了未定义的 seqlen，执行到此处会触发 NameError；
-        # 语义上应当是 seq_len。此处仅加注释，没有改动原计算逻辑。
         end_pos = start_pos + seq_len
 
-        # ============================== 构造 Query ==============================
-        q = self.wq_a(x)  # [bs, seq_len, q_lora_rank]
+        # ====== 构造 Query ======
+        q = self.wq_a(x)  # [bs, seq_len, q_lora_rank] 降维
         q = self.q_norm(q) # [bs, seq_len, q_lora_rank]
-        q = self.wq_b(q) # [bs, seq_len, n_heads * qk_head_dim] # self.n_heads * self.qk_head_dim
-        q = q.view(bs, seq_len, self.n_heads, self.qk_head_dim) # [bs, seq_len, n_heads, qk_head_dim]
-        # q_nope 用于内容匹配，q_pe 用于携带位置信息。
+        q = self.wq_b(q) # [bs, seq_len, n_heads * qk_head_dim]
+        q = q.view(bs, seq_len, self.n_heads, self.qk_head_dim) # [bs, seq_len, n_heads, qk_head_dim (qk_nope_head_dim + qk_rope_head_dim) ]
         # 示例形状分别为 [4,100,16,256] 和 [4,100,16,48]。
-        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) # q_nope shape:[bs, seq_len, n_heads, qk_nope_head_dim] q_pe shape:[bs, seq_len, n_heads, qk_rope_head_dim]
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1) 
         
-        # ========================= 构造压缩 KV 和 K_rope =========================
-        kv = self.wkv_a(x) # [bs, seq_len, kv_lora_rank + qk_rope_head_dim]
-        # 示例：把最后一维 112 拆为 latent KV 的 64 维和 K_rope 的 48 维。
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1) # kv shape:[bs, seq_len, kv_lora_rank] k_pe shape:[bs, seq_len, qk_rope_head_dim]
-        
-        # k_pe 在所有注意力头之间共享，所以先增加一个大小为 1 的 head 维。
+        # ====== 构造压缩 KV 和 K_rope ======
+        kv = self.wkv_a(x) # [bs, seq_len, kv_lora_rank + qk_rope_head_dim] 降维
+        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1) 
         k_pe = k_pe.unsqueeze(2) # k_pe shape:[bs, seq_len, 1, qk_rope_head_dim]
+
+        # ====== 旋转位置编码 ======
         # 只对 q_pe/k_pe 应用 RoPE；q_nope/k_nope 不进行旋转。
         q_pe, k_pe = self.rotary_emb(q_pe, k_pe)
 
 
         if self.mode == 'naive':
-            # ======================= 方式一：展开完整的 K/V =======================
-            # 将内容部分和位置部分重新拼接，得到每个头的完整 Query。
-            q = torch.cat([q_nope, q_pe], dim=-1) # * [bs, seq_len, n_heads, qk_head_dim]
+            # ====== 方式一：展开完整的 K/V ======
+            q = torch.cat([q_nope, q_pe], dim=-1)
             
             # 把 latent KV 从 Ckv 维解压为 H 个头各自的 K_nope 和 V。
             kv = self.kv_norm(kv) # [bs, seq_len, kv_lora_rank)]
             kv = self.wkv_b(kv) # [bs, seq_len, n_heads * (qk_nope_head_dim + v_head_dim)]
             kv = kv.view(bs, seq_len, self.n_heads, self.qk_nope_head_dim + self.v_head_dim)
-            # 示例：最后一维 512 拆成 K_nope 的 256 维和 V 的 256 维。
-            """
-            拆分 成 不带位置信息的 K 
-            和 V
-            """
             k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            
-            # k_pe 原本只有 1 个共享头，将它广播到 H 个头后与 k_nope 拼接。
-            """
-            最终的 K
-            """
+
             # 结果 K=[B,S,H,Dn+Dr]，示例为 [4,100,16,304]。
             k = torch.cat([k_nope, k_pe.expand(-1,-1,self.n_heads,-1)], dim=-1) 
-            # k shape:[bs, seq_len, n_heads, qk_head_dim]
 
-            # 将本次生成的 K/V 写入 [start_pos:end_pos]。
+            """
+            保存KV cache
+            K     : [4,100,16,304]
+            V     : [4,100,16,256]
+            """
             self.k_cache[:bs, start_pos:end_pos, :, :] = k
             self.v_cache[:bs, start_pos:end_pos, :, :] = v
-            # scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bs, :seq_len]) / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
 
-            # 注意力分数等价于 Q @ K^T / sqrt(Dn+Dr)：
-            #   q.transpose(1,2)              [B,H,S,Dq]
-            #   cache 两次 transpose 后       [B,H,Dq,T]
-            #   matmul 结果                    [B,H,S,T]
-            # 再交换回统一布局 [B,S,H,T]。
-            # self.qk_nope_head_dim + self.qk_rope_head_dim 是 K 的维度(不带 位置信息 的K 和 带ROPE 的K)。
-            # 注意：当前切片写的是 :seq_len。start_pos=0 的预填充阶段通常可用，
-            # 但增量解码时 T 应为 end_pos，所以语义上通常应读取 :end_pos。
+            """
+            [4,16,100,304] x [4,16,304,100]
+            -> [4,16,100,100]
+            -> transpose(1,2)
+            -> scores: [4,100,16,100]
+            """
             scores = torch.matmul(q.transpose(1, 2), self.k_cache[:bs, :seq_len, :, :].transpose(1, 2).transpose(2, 3) / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim))
             scores = scores.transpose(1, 2)
-            
         else:
-            # ================== 方式二：在 latent 空间计算注意力 ==================
-            # 去掉 k_pe 中大小为 1 的 head 维：[B,S,1,Dr] -> [B,S,Dr]。 
-            """
-            k_pe shape:[bs, seq_len, qk_rope_head_dim]
-            """
-            k_pe = k_pe.squeeze(2)
+            # ====== 方式二：在 latent 空间计算注意力 ======
+            k_pe = k_pe.squeeze(2) # [4,100,48]
 
-            # PyTorch Linear 的 weight 布局是 [out_features, in_features]。
+            # PyTorch Linear 的 weight 是 [out_features, in_features]
             wkv_b = self.wkv_b.weight  # [n_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]
-            # 将权重按 head 拆开，得到 [H,Dn+Dv,Ckv]。
-            # 每个头的前 Dn 行是 W_K，后 Dv 行是 W_V。
-            wkv_b = wkv_b.view(self.n_heads, -1, self.kv_lora_rank) # [n_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank]
+            """
+            前 256 行: W_K [16,256,64]
+            后 256 行: W_V [16,256,64]
+            """
+            wkv_b = wkv_b.view(self.n_heads, -1, self.kv_lora_rank)
 
+
+            """
             # 权重吸收的核心：
             #   k_nope = W_K @ c
-            #   q_nope @ k_nope^T = q_nope @ (W_K @ c)^T
-            #                       = (q_nope @ W_K) @ c^T
-            # 因此先把 q_nope 从 Dn 投影到 Ckv，后面可以直接与压缩表示 c 点积。
-            # [B,S,H,Dn] × [H,Dn,Ckv] -> [B,S,H,Ckv]
-            q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim]) # q_nope shape:[bs, seq_len, n_heads, kv_lora_rank]
-            # q*k(T) = x*wq*(c*wkv_b[:, :self.qk_nope_head_dim])(T) = x*wq*wkv_b[:, :self.qk_nope_head_dim](T)*c(T)    c为压缩后的kv
-            # wq*wkv_b[:, :self.qk_nope_head_dim](T)作为q的投影矩阵  c可以替代原先的k，这样就可以直接使用压缩后的kv计算注意力了，kv_caceh时也只需存储压缩后的kv
+            #   q_nope @ k_nope^T = q_nope @ (W_K @ c)^T = (q_nope @ W_K) @ c^T
+            # [4,100,16,256] × [16,256,64] -> [4,100,16,64]
             """
-            c可以替代原先的k，这样就可以直接使用压缩后的kv计算注意力了，kv_caceh时也只需存储压缩后的kv
-            """
+            q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
             # 缓存归一化后的 latent KV 和应用 RoPE 后的共享 K_pe。
             kv = self.kv_norm(kv)
             self.kv_cache[:bs, start_pos:end_pos, :] = kv # kv shape:[bs, seq_len, kv_lora_rank]
             self.pe_cache[:bs, start_pos:end_pos, :] = k_pe # k_pe shape:[bs, seq_len, qk_rope_head_dim]
             
-            # 内容分数：吸收 W_K 后的 Query 与 latent KV 做点积。
-            # [B,S,H,Ckv] · [B,T,Ckv] -> [B,S,H,T]
-            scores_nope = torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bs, :seq_len, :]) # bshc btc -> bshc bct -> bsht
-            # 位置分数：带 RoPE 的 Query/Key 做点积。
-            # [B,S,H,Dr] · [B,T,Dr] -> [B,S,H,T]
-            scores_pe = torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bs, :seq_len, :])  # bshr btr -> bshr bt1r -> bshr bthr -> bsht
-            # 两部分分数相加后，仍按完整 Q/K 头维度 Dn+Dr 进行缩放。
+            scores_nope = torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bs, :seq_len, :])
+            scores_pe = torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bs, :seq_len, :])
+            # 两部分分数相加后，仍按完整 Q/K 头维度 进行缩放。
             scores = (scores_nope + scores_pe) / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim) # [bs, seq_len, n_heads, seq_len]
-
-            # 与 naive 分支相同，这里的缓存切片在增量解码时语义上应到 end_pos，
-            # 当前使用 :seq_len 会只读取本次输入长度对应的缓存前缀。
         
         if mask is not None:
             # mask shape:[bs, seq_len, seq_len]
-            # 在 head 位置增加维度：[B,S,T] -> [B,S,1,T]，广播到全部 H 个头。
-            # 加性 mask 常见取值：允许关注的位置为 0，禁止关注的位置为 -inf。
             scores += mask.unsqueeze(2)
         
-        # 对所有可关注的 token（最后一维 T）做 softmax，使权重和为 1。
         scores = scores.softmax(dim=-1)
        
         if self.mode == 'naive':
-            # 标准注意力加权求和：AttentionWeights @ V。
-            # [B,S,H,T] × [B,T,H,Dv] -> [B,S,H,Dv]
-            x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bs, :seq_len]) # bsht,bthd -> bhst, bhtd -> bhsd -> bshd
+            # 标准注意力加权求和：AttentionWeights @ V
+            x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bs, :seq_len])
         else:
-            # 优化模式不显式还原所有 token 的完整 V。利用结合律：
-            #   sum_t(attn_t * V_t)
-            # = sum_t(attn_t * (W_V @ c_t))
-            # = W_V @ sum_t(attn_t * c_t)
+            """
+            A(cW_V^T)=(Ac)W_V^T
 
-            # scores * v = scores * [c * wkv_b[:, -self.v_head_dim:] = V]
-            # 先在 latent 空间对缓存 c 加权求和：[B,S,H,T] × [B,T,Ckv]
-            # -> [B,S,H,Ckv]。
-            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bs, :seq_len]) # x shape:[bs, seq_len, n_heads, kv_lora_rank]
-            # 再通过每个头的 W_V 解压到 Value 维：[B,S,H,Ckv] -> [B,S,H,Dv]。
-            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:]) # bshc, hdc -> bshc,dch -> bsdh -> bshd
+            [4,100,16,100] × [4,100,64]
+            -> latent context：[4,100,16,64]
 
-            # 注意：wkv_b 是带 bias 的 nn.Linear，但权重吸收路径只使用了 weight，
-            # 没有处理 bias，因此当前两种 mode 的输出并不严格等价。
+            [4,100,16,64] × [16,256,64]
+            -> context：[4,100,16,256]
+            """
+            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bs, :seq_len])
+            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
+
     
         # 将 H 个头拼接：[B,S,H,Dv] -> [B,S,H*Dv]，再投影回 dim。
         x = x.contiguous ().view(bs, seq_len, -1)

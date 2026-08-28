@@ -1,0 +1,185 @@
+digraph MLAForward {
+    graph [
+        rankdir=TB,
+        bgcolor="white",
+        pad="0.35",
+        nodesep="0.35",
+        ranksep="0.55",
+        splines=ortho,
+        fontname="Noto Sans CJK SC",
+        label="MLA.forward 前向过程（示例：B=4，S=100，H=16，Cq=128，Ckv=64，Dn=256，Dr=48，Dv=256）",
+        labelloc=t,
+        fontsize=22
+    ];
+
+    node [
+        shape=box,
+        style="rounded,filled",
+        color="#475569",
+        fillcolor="#F8FAFC",
+        fontname="Noto Sans CJK SC",
+        fontsize=12,
+        margin="0.14,0.10"
+    ];
+
+    edge [
+        color="#64748B",
+        penwidth=1.4,
+        arrowsize=0.75,
+        fontname="Noto Sans CJK SC",
+        fontsize=10
+    ];
+
+    input [
+        fillcolor="#E0F2FE",
+        color="#0284C7",
+        penwidth=1.8,
+        label="输入 x\n[B,S,dim] = [4,100,4096]\nstart_pos=0，end_pos=100"
+    ];
+
+    q_path [
+        fillcolor="#EEF2FF",
+        color="#4F46E5",
+        label="Query 路径\nwq_a：4096 → 128\nq_norm\nwq_b：128 → 16×304=4864\nreshape：[4,100,16,304]\nsplit → q_nope [4,100,16,256]\n          q_pe     [4,100,16,48]"
+    ];
+
+    kv_path [
+        fillcolor="#ECFDF5",
+        color="#059669",
+        label="KV 路径\nwkv_a：4096 → 64+48=112\nsplit → c_KV [4,100,64]\n          k_pe  [4,100,48]\nkv_norm 只作用于 c_KV\nk_pe.unsqueeze(2) → [4,100,1,48]"
+    ];
+
+    rope [
+        fillcolor="#FFF7ED",
+        color="#EA580C",
+        label="只旋转位置部分（RoPE）\nq_pe [4,100,16,48]\nk_pe [4,100,1,48]\n→ q_pe^R 与共享的 k_pe^R"
+    ];
+
+    common [
+        fillcolor="#F1F5F9",
+        label="公共中间结果\nq_nope：[B,S,H,Dn]\nq_pe^R ：[B,S,H,Dr]\nc_KV    ：[B,S,Ckv]\nk_pe^R ：[B,S,Dr]（所有头共享）"
+    ];
+
+    mode [
+        shape=diamond,
+        style="filled",
+        fillcolor="#FEF3C7",
+        color="#D97706",
+        label="mode == 'naive'?"
+    ];
+
+    input -> q_path;
+    input -> kv_path;
+    q_path -> rope [label="q_pe"];
+    kv_path -> rope [label="k_pe"];
+    q_path -> common [label="q_nope"];
+    kv_path -> common [label="c_KV"];
+    rope -> common [label="旋转后的 q_pe / k_pe"];
+    common -> mode;
+
+    subgraph cluster_naive {
+        label="naive：显式解压并缓存完整 K/V";
+        labelloc=t;
+        fontsize=16;
+        fontname="Noto Sans CJK SC";
+        color="#2563EB";
+        bgcolor="#EFF6FF";
+        style="rounded,filled";
+        margin=16;
+
+        n_build [
+            fillcolor="#DBEAFE",
+            color="#2563EB",
+            label="构造完整 Q、K、V\nQ = concat(q_nope, q_pe^R)\n→ [B,S,H,304]\n\nwkv_b：c_KV 64 → H×(Dn+Dv)=8192\nreshape / split：\nk_nope [B,S,H,256]，V [B,S,H,256]\nK = concat(k_nope, expand(k_pe^R))\n→ [B,S,H,304]"
+        ];
+
+        n_cache [
+            fillcolor="#DBEAFE",
+            color="#2563EB",
+            label="缓存完整 K/V\nk_cache[:, start_pos:end_pos]\nv_cache[:, start_pos:end_pos]\n\n每 token：H×((Dn+Dr)+Dv)\n=16×(304+256)=8960 个数"
+        ];
+
+        n_score [
+            fillcolor="#DBEAFE",
+            color="#2563EB",
+            label="注意力分数\nscores = Q · K_cache^T / sqrt(Dn+Dr)\n[B,S,H,304] × [B,H,304,T]\n→ [B,S,H,T]\n加 mask 后沿 T 做 softmax"
+        ];
+
+        n_value [
+            fillcolor="#DBEAFE",
+            color="#2563EB",
+            label="对完整 V 加权求和\nsoftmax(scores) · V_cache\n[B,S,H,T] × [B,T,H,256]\n→ context [B,S,H,256]"
+        ];
+
+        n_build -> n_cache -> n_score -> n_value;
+    }
+
+    subgraph cluster_absorb {
+        label="压缩模式：权重吸收，只缓存 latent KV";
+        labelloc=t;
+        fontsize=16;
+        fontname="Noto Sans CJK SC";
+        color="#059669";
+        bgcolor="#ECFDF5";
+        style="rounded,filled";
+        margin=16;
+
+        o_absorb [
+            fillcolor="#D1FAE5",
+            color="#059669",
+            label="拆分 wkv_b 权重\nW_K：[H,Dn,Ckv] = [16,256,64]\nW_V：[H,Dv,Ckv] = [16,256,64]\n\n吸收 W_K：q_nope · W_K\n[B,S,H,256] → [B,S,H,64]"
+        ];
+
+        o_cache [
+            fillcolor="#D1FAE5",
+            color="#059669",
+            label="缓存压缩表示与位置 Key\nkv_cache：[B,T,64]\npe_cache：[B,T,48]\n\n每 token：Ckv+Dr\n=64+48=112 个数（约缩小 80 倍）"
+        ];
+
+        o_score [
+            fillcolor="#D1FAE5",
+            color="#059669",
+            label="分别计算两部分分数\nscores_nope = (q_nope·W_K) · kv_cache^T\nscores_pe   = q_pe^R · pe_cache^T\nscores = (scores_nope+scores_pe)/sqrt(Dn+Dr)\n→ [B,S,H,T]\n加 mask 后沿 T 做 softmax"
+        ];
+
+        o_value [
+            fillcolor="#D1FAE5",
+            color="#059669",
+            label="先在 latent 空间聚合，再解压 Value\nlatent_context = softmax(scores) · kv_cache\n[B,S,H,T] × [B,T,64] → [B,S,H,64]\ncontext = latent_context · W_V\n→ [B,S,H,256]"
+        ];
+
+        o_absorb -> o_cache -> o_score -> o_value;
+    }
+
+    mode -> n_build [label="是", color="#2563EB"];
+    mode -> o_absorb [label="否", color="#059669"];
+
+    merge [
+        fillcolor="#F3E8FF",
+        color="#9333EA",
+        penwidth=1.8,
+        label="合并多头并输出投影\ncontext.contiguous().view(B,S,H×Dv)\n[4,100,16,256] → [4,100,4096]\nwo：4096 → 4096"
+    ];
+
+    output [
+        fillcolor="#FCE7F3",
+        color="#DB2777",
+        penwidth=1.8,
+        label="输出 x\n[B,S,dim] = [4,100,4096]"
+    ];
+
+    n_value -> merge [color="#2563EB"];
+    o_value -> merge [color="#059669"];
+    merge -> output;
+
+    warning [
+        shape=note,
+        style="filled",
+        fillcolor="#FEF2F2",
+        color="#DC2626",
+        fontcolor="#991B1B",
+        label="当前代码的增量解码注意点\n① seqlen 未定义，应为 seq_len\n② RoPE 应按 start_pos:end_pos 取位置\n③ cache 读取应到 :end_pos，而不是 :seq_len\n④ 压缩分支只使用 wkv_b.weight，忽略了 bias"
+    ];
+
+    output -> warning [style=dashed, arrowhead=none, color="#DC2626"];
+}
