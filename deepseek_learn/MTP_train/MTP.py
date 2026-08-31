@@ -11,13 +11,16 @@ from torch.utils.tensorboard import SummaryWriter
 
 class Config():
     def __init__(self,
-                llm_model_path = '/home/user/Downloads/Qwen2.5-0.5B-Instruct',
-                predict_tokens_num = 5,
+                llm_model_path = '/data2/home/jiapeng2/code/LLM/llm_related/models/Qwen2.5-0.5B-Instruct',
+                predict_tokens_num = 5, # 主模型 预测的 token 加上 MTP 预测的 token ( 1 个 主模型 token +  MTP 预测的 4 个 token)
                 **kwargs):
-        self.llm_model_path = llm_model_path
-        self.predict_tokens_num = predict_tokens_num
+        self.llm_model_path = llm_model_path # 主模型 路径
+        self.predict_tokens_num = predict_tokens_num # 预测多少个 token
         super().__init__(**kwargs)
 
+"""
+使用 MLP 代替 原始论文的 Transformer block
+"""
 class MTPModule(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
@@ -35,9 +38,11 @@ class MTP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.main_model = AutoModelForCausalLM.from_pretrained(self.config.llm_model_path).base_model
+        # base_model 去掉了 预测头 去掉了
+        self.main_model = AutoModelForCausalLM.from_pretrained(self.config.llm_model_path).base_model 
+
         # self.main_model.eval()
-        # mtp模块
+        # mtp模块 一个主模型 + MLP预测头
         self.mtp_modules = nn.ModuleList([MTPModule(self.main_model.config.hidden_size) for _ in range(self.config.predict_tokens_num-1)])
         
         # 每个头共享参数
@@ -45,19 +50,59 @@ class MTP(nn.Module):
         
          
     def forward_main(self, input_ids, attention_mask=None, **kwargs):
-        
+        """
+        主模型头的 前向传播
+        """
         # with torch.no_grad():
         main_hidden_output = self.main_model(input_ids, attention_mask, **kwargs).last_hidden_state
-       
-        
         main_head_output = self.output_head(main_hidden_output)
         
         return main_hidden_output, main_head_output
     
     def forward_mtp(self, input_ids, previous_hidden_output, head_index):
+        """
+        MTP 头 的 前向传播
+
+        head_index: 第几个 MTP 头
+
+        input_ids = [t1, t2, t3, t4, t5, t6]
+        previous_hidden_output = [h1⁰, h2⁰, h3⁰, h4⁰, h5⁰, h6⁰]
+
+        第一个 MTP 头：head_index = 0
+        [e(t2), e(t3), e(t4), e(t5)] cat [h1⁰, h2⁰, h3⁰, h4⁰] -> 预测 [t3, t4, t5, t6]
+
+        第二个 MTP 头：head_index = 1
+        previous_hidden_output = [h1¹, h2¹, h3¹, h4¹]
+        [e(t3), e(t4), e(t5)] cat [h1¹, h2¹, h3¹] -> [t4, t5, t6]
+
+        ---
+        训练时：
+            主模型：   t1 → t2，t2 → t3，t3 → t4，t4 → t5，t5 → t6
+            MTP头0： (t1,t2) → t3，(t2,t3) → t4，…… 
+            MTP头1： (t1,t2,t3) → t4，……
+            MTP头2： (t1,t2,t3,t4) → t5，……
+            MTP头3： (t1,t2,t3,t4,t5) → t6
+        推理时：
+            主模型： h1⁰                       → t2
+            MTP头0：(h1⁰, t2)                 → t3
+            MTP头1：(h1¹, t3)，h1¹包含t1,t2   → t4
+            MTP头2：(h1², t4)，h1²包含t1~t3   → t5
+            MTP头3：(h1³, t5)，h1³包含t1~t4   → t6
+        ---
+        对比：
+            普通生成：需要主模型顺序生成 t2 → t3 → t4 → t5 → t6
+            MTP生成：主模型生成 t2，轻量MTP模块继续草拟 t3 → t4 → t5 → t6
+        """
+
+        """
+        这是训练的 代码
+        """
         mtp_input_ids = input_ids[:, head_index + 1:-1]
-        current_hidden_output = previous_hidden_output[:, :mtp_input_ids.size(1), :]
         input_embed = self.main_model.get_input_embeddings()(mtp_input_ids)
+
+        current_hidden_output = previous_hidden_output[:, :mtp_input_ids.size(1), :]
+        
+
         mtp_input = torch.cat([current_hidden_output, input_embed], dim=-1)
         mtp_hidden_output = self.mtp_modules[head_index](mtp_input)
         mtp_head_output = self.output_head(mtp_hidden_output)
@@ -65,6 +110,16 @@ class MTP(nn.Module):
         return mtp_hidden_output, mtp_head_output
 
     def forward_mtp_step(self, input_ids, previous_hidden_output, head_index):
+        """
+        推理时：
+            主模型： h1⁰                      → t2
+            MTP头0：(h1⁰, e(t2))                → t3
+            MTP头1：(h1¹, e(t3))，h1¹包含t1,t2   → t4
+            MTP头2：(h1², e(t4))，h1²包含t1~t3   → t5
+            MTP头3：(h1³, e(t5))，h1³包含t1~t4   → t6
+        举例：
+            (h1, 预测出来的t2) → t3
+        """
         input_embed = self.main_model.get_input_embeddings()(input_ids)
         mtp_input = torch.cat([previous_hidden_output, input_embed], dim=-1)
         mtp_hidden_output = self.mtp_modules[head_index](mtp_input)
@@ -74,7 +129,11 @@ class MTP(nn.Module):
     
     
     def forward(self, input_ids, attention_mask=None, **kwargs):
-        
+        """
+        最终的 前向传播, 主模型 和 MTP
+
+        用来 训练的 前向 传播的 代码
+        """
         outputs = {}
         main_hidden_output, main_head_output = self.forward_main(input_ids, attention_mask, **kwargs)
         previous_hidden_output = main_hidden_output
@@ -86,6 +145,17 @@ class MTP(nn.Module):
         return outputs
     
     def generate(self,input_ids,max_length, **kwargs):
+        """
+        生成部分 的 代码
+        推理时：
+            主模型： h1⁰                      → t2
+            MTP头0：(h1⁰, e(t2))                → t3
+            MTP头1：(h1¹, e(t3))，h1¹包含t1,t2   → t4
+            MTP头2：(h1², e(t4))，h1²包含t1~t3   → t5
+            MTP头3：(h1³, e(t5))，h1³包含t1~t4   → t6
+        
+        之后 需要 验证 MTP 生成的 token
+        """
         self.eval()
         seq = input_ids.clone()
         b, s = seq.size()
@@ -103,6 +173,7 @@ class MTP(nn.Module):
                 probs = torch.softmax(logits, dim=-1)
                 next_token = torch.argmax(probs, dim=-1)
                 speculative_tokens.append(next_token.unsqueeze(1))
+
                 previous_hidden_output = main_hidden_output[:, -1:, :]
                 current_input_ids = next_token.unsqueeze(1)
                 
@@ -131,7 +202,11 @@ class MTP(nn.Module):
                 # 将新序列输入main模型(验证模型)进行验证，保留符合条件的token
                 _, all_logits = self.forward_main(all_tokens)
                 
-                # 第一个token由main模型直接生成，这里只验证后续的mtp token
+                """
+                第一个token由main模型直接生成，这里只验证后续的mtp token
+                NOTE: all_logits[:, seq.shape[1]:-1] 到 -1 是因为 上一个 的 概率 是用来预测 下一个 token的
+                位置 i 的 logits，用来预测位置 i+1 的 token
+                """
                 validation_logits = all_logits[:, seq.shape[1]:-1]
                 validation_tokens = speculative_tokens[:, 1:]
                 
@@ -140,28 +215,37 @@ class MTP(nn.Module):
                 if validation_tokens.shape[1] > 0:
                     accept_probs =  []
 
-                    for i in range(validation_tokens.shape[1]):
+                    for i in range(validation_tokens.shape[1]): # validation_tokens.shape[1] = MTP 预测 的 token数量
                         logits = validation_logits[:, i] # (batch_size, vocab_size)
                         probs = torch.softmax(logits, dim=-1) # (batch_size, vocab_size)
-                        token = validation_tokens[:, i]
+                        token = validation_tokens[:, i] # 例如：token = tensor([42]) 说明需要查看主模型分配给词表编号 42 的概率。
                        
-                        token_prob = probs.gather(1, token.unsqueeze(1))
+                        token_prob = probs.gather(1, token.unsqueeze(1)) # [1] → [1, 1], gather 在词表维度中找到 token 对应的概率：
+                        
                         accept_probs.append(token_prob)
-                 
-                    # 拼接各个token的生成概率
-                    accept_probs = torch.cat(accept_probs, dim=-1)
+
+                    """
+                    [
+                        y2的概率，   # shape [1,1]
+                        y3的概率，   # shape [1,1]
+                        y4的概率，   # shape [1,1]
+                        y5的概率     # shape [1,1]
+                    ]
+                    """
+                    # 拼接各个token的生成概率 accept_probs.shape = [1, 4] = [batch_size, token_num]
+                    accept_probs = torch.cat(accept_probs, dim=-1) 
                     
                     # 保留概率值大于阈值的token, 接受这部分token,否则舍弃（舍弃某个token时，后面的token都要舍弃）
                     # 接受token的掩码
-                    accept_mask = (accept_probs > 1e-6)
+                    accept_mask = (accept_probs > 1e-6) # accept_mask.shape = [1, 4] = [batch_size, token_num]
                     print(f'接受掩码：{accept_mask}')
                     print(f'拒绝掩码：{~accept_mask}')
-                    # 获取被拒绝（舍弃）token对应的索引
+                    # 获取被拒绝（舍弃）token对应的索引 找出第一个拒绝位置
                     reject_token_index = (~accept_mask).nonzero(as_tuple=True)[1]
                     print(f'拒绝token的索引：{reject_token_index}')
-                    # 如果有需要舍弃的token
+                    
                     if reject_token_index.shape[0] > 0:
-                        
+                        # 如果有需要舍弃的token
                         # 第一个token默认接受，后续接受数量由第一个被拒绝的mtp token决定
                         accept_num += reject_token_index[0].item()
                     
@@ -169,7 +253,7 @@ class MTP(nn.Module):
                         # 如果没有需要舍弃的token，则全部接受
                         accept_num = speculative_tokens.shape[1]
                 
-                
+                # 接受生成的 token
                 if accept_num > 0:
                     
                    # 取出通过验证的token
@@ -217,16 +301,15 @@ def train(config, model, dataloader, optimizer, writer, device, epochs, print_st
                 
                 target = labels[:, 1+index+1:] # [batch_size, seq_len]
                 target = target.contiguous().view(-1) # [batch_size * seq_len]
-                
+                # 用来训练 MTP 模块
                 mtp_loss = F.cross_entropy(mtp_head_output, target, ignore_index=-100)
-                
                 mtp_loss.backward(retain_graph=True)
                 
+            # 对 主模型 进行 反向传播
             main_loss = F.cross_entropy(main_head_output[:, :-1].reshape(-1, model.main_model.config.vocab_size), labels[:, 1:].reshape(-1), ignore_index=-100)
-            
             main_loss.backward()
             
-            optimizer.step()
+            optimizer.step() # 优化器使用累加后的总梯度更新参数
             
             if (steps+1) % print_step==0:
                 writer.add_scalar('main_loss', main_loss.item(), steps)
@@ -283,6 +366,10 @@ class MyDataCollator:
         max_len = max(len(feature['input_ids']) for feature in features)
         input_ids = []
         labels = []
+        """
+        保证 一个 batch 的 所有 sample 的长度相同
+        这里是 右 padding
+        """
         for feature in features:
             input_ids.append(feature['input_ids'] + [self.tokenizer.pad_token_id] * (max_len - len(feature['input_ids'])))
             labels.append(feature['labels'] + [-100] * (max_len - len(feature['labels'])))
@@ -310,4 +397,3 @@ if __name__ == '__main__':
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     train(config, model, dataloader, optimizer, writer, device='cuda', epochs=10, print_step=10, save_step=500, save_path='mtp')
-    
