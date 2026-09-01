@@ -21,6 +21,11 @@ class RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         
         super().__init__()
+        """
+        这里不是Zero-Centered RMSNorm, 这里是原始实现
+
+        Zero-Centered RMSNorm 将权重 $w$ 初始化为 0，归一化结果乘以 $1+w$
+        """
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
@@ -207,7 +212,9 @@ class Attention(nn.Module):
 
 
 class DynamicCache:
-    
+    """
+    缓存 KV cache 和 状态矩阵 卷积序列
+    """
     def __init__(self, config):
         super().__init__()
         
@@ -283,7 +290,11 @@ class GatedDeltaNet(nn.Module):
             projected_states_ba, 
             [self.num_v_heads, self.num_v_heads], 
             dim=-1)
-        
+
+
+        """
+        卷积 ========================================================
+        """
         mixed_qkv = torch.cat([query, key, value], dim=-1)
         
         mixed_qkv = mixed_qkv.transpose(1,2)
@@ -294,7 +305,7 @@ class GatedDeltaNet(nn.Module):
             if s > 1:
         
                 conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
-                cache_params.conv_states[self.layer_idx] = conv_state
+                cache_params.conv_states[self.layer_idx] = conv_state # cache
                 mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :s])
               
             else:
@@ -331,9 +342,14 @@ class GatedDeltaNet(nn.Module):
         query = query.reshape(bs, s, -1, self.head_k_dim)
         key = key.reshape(bs, s, -1, self.head_k_dim)
         value = value.reshape(bs, s, -1, self.head_v_dim)
+
+        # ===========================================================
         
         beta = b.sigmoid()
-        
+
+        """
+        $alpha$
+        """
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
         
         # 类似于GQA, 保持head数一致
@@ -360,7 +376,9 @@ class GatedDeltaNet(nn.Module):
             recurrent_state = cache_params.recurrent_states[self.layer_idx]
         last_recurrent_state = torch.zeros(bs, num_heads, head_k_dim, head_v_dim).to(value) if recurrent_state is None else recurrent_state.to(value)
 
-        
+        """
+        计算注意力 分数
+        """
         for i in range(s):
             q_t = query[:, :, i]
             k_t = key[:, :, i]
@@ -378,8 +396,8 @@ class GatedDeltaNet(nn.Module):
         core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(query.dtype)
         core_attn_out = core_attn_out.reshape(bs, s, -1)
 
+        # 历史缓存
         if cache_params is not None:
-       
             cache_params.recurrent_states[self.layer_idx] = last_recurrent_state
 
         z = F.silu(z)
@@ -410,6 +428,9 @@ def load_balancing_loss_func(
     gate_logits,
     num_experts,
     top_k):
+    """
+    MoE 负载均衡损失
+    """
     concatenated_gate_logits = torch.cat([layer_gate for layer_gate in gate_logits], dim=0) # 各个层的gate_logit进行合并[layers X batch_size X sequence_length, num_experts]
     routing_weights = F.softmax(concatenated_gate_logits, dim=-1)
     _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
