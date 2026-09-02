@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
+  <title id="title">Causal Mask、Index Mask 与最终掩码</title>
+  <desc id="desc">最终允许注意的位置是因果掩码允许位置和 Top-K 索引位置的交集。</desc>
+  <defs>
+    <pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse">
+      <path d="M26 0H0V26" fill="none" stroke="#64748b" stroke-width="1.2"/>
+    </pattern>
+    <style>
+      .title { font-family: "Noto Sans CJK SC"; font-size: 28px; font-weight: 700; fill: #0f172a; }
+      .label { font-family: "Noto Sans CJK SC"; font-size: 21px; font-weight: 600; fill: #0f172a; }
+      .small { font-family: "Noto Sans CJK SC"; font-size: 16px; fill: #475569; }
+      .symbol { font-family: "Noto Sans CJK SC"; font-size: 42px; font-weight: 700; fill: #334155; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="500" rx="24" fill="#f8fafc"/>
+  <text x="600" y="48" text-anchor="middle" class="title">最终掩码 = Causal Mask ∩ Index Mask</text>
+
+  <!-- Causal mask -->
+  <g transform="translate(90 105)">
+    <text x="130" y="-22" text-anchor="middle" class="label">Causal Mask</text>
+    <rect width="260" height="260" fill="#e2e8f0"/>
+    <path d="M0 0H26V26H52V52H78V78H104V104H130V130H156V156H182V182H208V208H234V234H260V260H0Z" fill="#fde68a"/>
+    <rect width="260" height="260" fill="url(#grid)" stroke="#334155" stroke-width="2"/>
+    <text x="130" y="292" text-anchor="middle" class="small">只允许关注当前及过去位置</text>
+  </g>
+
+  <text x="405" y="245" text-anchor="middle" class="symbol">+</text>
+
+  <!-- Index mask -->
+  <g transform="translate(470 105)">
+    <text x="130" y="-22" text-anchor="middle" class="label">Index Mask</text>
+    <rect width="260" height="260" fill="#e2e8f0"/>
+    <g fill="#c4b5fd">
+      <rect x="0" y="0" width="26" height="26"/><rect x="104" y="0" width="26" height="26"/><rect x="234" y="0" width="26" height="26"/>
+      <rect x="26" y="26" width="26" height="26"/><rect x="78" y="26" width="26" height="26"/><rect x="182" y="26" width="26" height="26"/>
+      <rect x="0" y="52" width="26" height="26"/><rect x="52" y="52" width="26" height="26"/><rect x="156" y="52" width="26" height="26"/>
+      <rect x="26" y="78" width="26" height="26"/><rect x="104" y="78" width="26" height="26"/><rect x="208" y="78" width="26" height="26"/>
+      <rect x="0" y="104" width="26" height="26"/><rect x="78" y="104" width="26" height="26"/><rect x="130" y="104" width="26" height="26"/>
+      <rect x="52" y="130" width="26" height="26"/><rect x="104" y="130" width="26" height="26"/><rect x="234" y="130" width="26" height="26"/>
+      <rect x="0" y="156" width="26" height="26"/><rect x="78" y="156" width="26" height="26"/><rect x="182" y="156" width="26" height="26"/>
+      <rect x="26" y="182" width="26" height="26"/><rect x="130" y="182" width="26" height="26"/><rect x="208" y="182" width="26" height="26"/>
+      <rect x="0" y="208" width="26" height="26"/><rect x="104" y="208" width="26" height="26"/><rect x="156" y="208" width="26" height="26"/>
+      <rect x="52" y="234" width="26" height="26"/><rect x="130" y="234" width="26" height="26"/><rect x="234" y="234" width="26" height="26"/>
+    </g>
+    <rect width="260" height="260" fill="url(#grid)" stroke="#334155" stroke-width="2"/>
+    <text x="130" y="292" text-anchor="middle" class="small">只允许 Indexer 选中的 Top-K 位置</text>
+  </g>
+
+  <text x="785" y="245" text-anchor="middle" class="symbol">=</text>
+
+  <!-- Final mask -->
+  <g transform="translate(850 105)">
+    <text x="130" y="-22" text-anchor="middle" class="label">最终掩码</text>
+    <rect width="260" height="260" fill="#e2e8f0"/>
+    <g fill="#86efac">
+      <rect x="0" y="0" width="26" height="26"/>
+      <rect x="26" y="26" width="26" height="26"/>
+      <rect x="0" y="52" width="26" height="26"/><rect x="52" y="52" width="26" height="26"/>
+      <rect x="26" y="78" width="26" height="26"/>
+      <rect x="0" y="104" width="26" height="26"/><rect x="78" y="104" width="26" height="26"/><rect x="104" y="104" width="26" height="26"/>
+      <rect x="52" y="130" width="26" height="26"/><rect x="104" y="130" width="26" height="26"/>
+      <rect x="0" y="156" width="26" height="26"/><rect x="78" y="156" width="26" height="26"/>
+      <rect x="26" y="182" width="26" height="26"/><rect x="130" y="182" width="26" height="26"/>
+      <rect x="0" y="208" width="26" height="26"/><rect x="104" y="208" width="26" height="26"/><rect x="156" y="208" width="26" height="26"/>
+      <rect x="52" y="234" width="26" height="26"/><rect x="130" y="234" width="26" height="26"/><rect x="234" y="234" width="26" height="26"/>
+    </g>
+    <rect width="260" height="260" fill="url(#grid)" stroke="#334155" stroke-width="2"/>
+    <text x="130" y="292" text-anchor="middle" class="small">同时满足因果约束与 Top-K 选择</text>
+  </g>
+
+  <g transform="translate(330 440)">
+    <rect width="18" height="18" rx="3" fill="#fde68a"/><text x="27" y="15" class="small">因果允许位置</text>
+    <rect x="210" width="18" height="18" rx="3" fill="#c4b5fd"/><text x="237" y="15" class="small">Top-K 位置</text>
+    <rect x="400" width="18" height="18" rx="3" fill="#86efac"/><text x="427" y="15" class="small">最终保留位置</text>
+  </g>
+</svg>

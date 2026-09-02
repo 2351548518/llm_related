@@ -315,6 +315,9 @@ class DecoderLayer(nn.Module):
         weights = F.softmax(scores, dim=-1) # shape: [b, s, layer]
 
         weighted_values = weights.unsqueeze(-1) * values  # shape: [b, s, layer, 1] * [b, s, layer, d] = [b, s, layer, d]
+        """
+        对过去 不同层的 输出 加权之后的 结果
+        """
         aggregated = weighted_values.sum(dim=2)           # shape: [b, s, d]
 
         return aggregated
@@ -327,17 +330,19 @@ class DecoderLayer(nn.Module):
         cache_params:DynamicCache = None
     ):
         
-
+        # 做 残差
         attn_input = self.attn_res(past_layer_states, hidden_states, self.attn_query, self.attn_norm)
         past_layer_states.append(hidden_states)
-        
         attn_normed = self.input_layernorm(attn_input)
-
         hidden_states = self.self_attn(hidden_states=attn_normed, attention_mask=attention_mask, cache_params=cache_params)
+
+
 
         mlp_input = self.attn_res(past_layer_states, hidden_states, self.mlp_query, self.mlp_norm)
         past_layer_states.append(hidden_states)
         mlp_normed = self.post_attention_layernorm(mlp_input)
+
+
         if self.layer_idx % 2 == 0:
             hidden_states = self.mlp(mlp_normed)
             gate_logit = None
@@ -427,7 +432,7 @@ class LLM(PreTrainedModel):
  
         hidden_states = self.dropout(hidden_states)  
 
-        # 历史层的状态
+        # NOTE: 历史层的状态
         past_layer_states = []
 
 
